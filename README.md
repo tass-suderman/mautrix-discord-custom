@@ -109,7 +109,8 @@ in addition to the upstream dependencies.
 The [Container workflow](.github/workflows/container.yml) tests the bridge with
 both media converters, builds the complete Dockerfile, and publishes to GHCR on
 pushes to `main` or manual runs. Pull requests build and test without publishing.
-Images currently target **linux/amd64**.
+Images support **linux/amd64** and **linux/arm64** (including ARM64/v8 hosts).
+The workflow tests and builds both architectures, using QEMU for ARM64.
 
 For this repository, tags are:
 
