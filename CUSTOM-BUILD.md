@@ -10,7 +10,7 @@ bridge:
 
 They default to true in the updated example config and are added during config
 upgrades. Klipy MP4 video embeds become looping GIF images (15 fps, at most
-480 pixels per side). FFmpeg is already included in the Docker image. Conversion
+480 pixels per side, potentially enlarging small inputs). FFmpeg is already included in the Docker image. Conversion
 errors appear as media failure notices. Previously posted Matrix videos are not
 changed. Discord deletions, including bulk deletions, become edits with a
 **Deleted message** header and the elapsed time since posting, retaining text and media. Matrix-origin deletions
@@ -72,3 +72,7 @@ If an original WebP download or conversion fails, the bridge falls back to
 Discord's thumbnail proxy when available. This may be static, but avoids a media
 failure notice when Discord still has a usable preview. Failed transfers are
 retried on later messages so upstream recovery does not require a bridge restart.
+
+For prebuilt GHCR images and a complete list of custom behavior, see [README.md](README.md).
+Run only one bridge against the database. Ensure the registration loaded by the
+homeserver points to the active bridge hostname and port.

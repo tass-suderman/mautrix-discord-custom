@@ -6,6 +6,10 @@ COPY . /build
 WORKDIR /build
 RUN go build -o /usr/bin/mautrix-discord
 
+FROM builder AS test
+RUN apk add --no-cache ffmpeg imagemagick
+RUN go test ./...
+
 FROM alpine:3.24
 
 ENV UID=1337 \

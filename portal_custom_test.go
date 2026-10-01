@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"image/gif"
@@ -54,7 +55,7 @@ func TestDeletedMessageContent(t *testing.T) {
 }
 
 func TestWebPEmbedUpdateKeepsMedia(t *testing.T) {
-	url := "https://gif.fxtwitter.com/tweet_video/HTUjWCtaoAAN_u8.webp"
+	url := "https://gif.fxtwitter.com/tweet_video/example.webp"
 	msg := &discordgo.Message{Content: url, Embeds: []*discordgo.MessageEmbed{{URL: url, Type: discordgo.EmbedTypeImage, Thumbnail: &discordgo.MessageEmbedThumbnail{ProxyURL: url}}}}
 	part := &database.Message{AttachmentID: "video_" + url}
 	if removed := removedDiscordParts(msg, []*database.Message{part}); len(removed) != 0 {
@@ -80,7 +81,7 @@ func TestDeletionDelay(t *testing.T) {
 }
 
 func TestStickerDownloadURL(t *testing.T) {
-	if got := discordStickerURL("1555078768916172890", discordgo.StickerFormatTypeGIF); got != "https://media.discordapp.net/stickers/1555078768916172890.gif" {
+	if got := discordStickerURL("123456789012345678", discordgo.StickerFormatTypeGIF); got != "https://media.discordapp.net/stickers/123456789012345678.gif" {
 		t.Fatal(got)
 	}
 	if got := discordStickerURL("123", discordgo.StickerFormatTypeAPNG); got != discordgo.EndpointStickerImage("123", discordgo.StickerFormatTypeAPNG) {
@@ -216,5 +217,80 @@ func TestWebPThumbnailFallback(t *testing.T) {
 	embed.Thumbnail = nil
 	if got := webPThumbnailFallback(embed, original); got != "" {
 		t.Fatal(got)
+	}
+}
+
+func TestDiscordAttachmentSpoiler(t *testing.T) {
+	portal := &Portal{Portal: &database.Portal{}, bridge: &DiscordBridge{DMA: &DirectMediaAPI{
+		attachmentCache: make(map[AttachmentCacheKey]AttachmentCacheValue),
+	}}}
+	portal.Key.ChannelID = "1"
+	portal.bridge.DMA.cfg.ServerName = "media.example"
+	for _, tc := range []struct {
+		filename, description string
+		spoiler               bool
+	}{
+		{"SPOILER_image.png", "", true},
+		{"SPOILER_image.png", "A caption", true},
+		{"image.png", "SPOILER_ in the caption", false},
+	} {
+		t.Run(tc.filename+tc.description, func(t *testing.T) {
+			part := portal.convertDiscordAttachment(context.Background(), nil, "2", &discordgo.MessageAttachment{
+				ID: "3", Filename: tc.filename, Description: tc.description, ContentType: "image/png",
+				URL: "https://cdn.discordapp.com/attachments/1/3/image.png",
+			})
+			raw, err := json.Marshal(&event.Content{Parsed: part.Content, Raw: part.Extra})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var content map[string]any
+			if err := json.Unmarshal(raw, &content); err != nil {
+				t.Fatal(err)
+			}
+			if (content[mediaSpoilerKey] == true) != tc.spoiler {
+				t.Fatalf("wrong spoiler metadata: %s", raw)
+			}
+			if content["msgtype"] != "m.image" || content["url"] == "" {
+				t.Fatalf("lost image: %s", raw)
+			}
+			if tc.description != "" && content["body"] != tc.description {
+				t.Fatalf("lost caption: %s", raw)
+			}
+		})
+	}
+}
+
+func TestDeletedMediaSpoilerEdit(t *testing.T) {
+	originalRaw := map[string]any{mediaSpoilerKey: true, mediaSpoilerKey + ".reason": "Sensitive", "unrelated": true}
+	original := &event.MessageEventContent{MsgType: event.MsgImage, Body: "SPOILER_image.png", URL: "mxc://example/image"}
+	content := deletedMessageContent(original, time.Unix(0, 0), time.Unix(5, 0))
+	content.SetEdit("$original")
+	raw, err := json.Marshal(&event.Content{Parsed: content, Raw: spoilerEditExtra(originalRaw)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edit map[string]any
+	if err := json.Unmarshal(raw, &edit); err != nil {
+		t.Fatal(err)
+	}
+	updated := edit["m.new_content"].(map[string]any)
+	for _, level := range []map[string]any{edit, updated} {
+		if level[mediaSpoilerKey] != true || level[mediaSpoilerKey+".reason"] != "Sensitive" {
+			t.Fatalf("spoiler lost: %s", raw)
+		}
+		if level["unrelated"] != nil {
+			t.Fatalf("unrelated metadata copied: %s", raw)
+		}
+	}
+	if updated["url"] != "mxc://example/image" || updated["msgtype"] != "m.image" {
+		t.Fatalf("image lost: %s", raw)
+	}
+	if len(originalRaw) != 3 || original.Body != "SPOILER_image.png" {
+		t.Fatal("original was mutated")
+	}
+	for _, plain := range []map[string]any{nil, {}, {mediaSpoilerKey: false}} {
+		if spoilerEditExtra(plain) != nil {
+			t.Fatal("plain media marked as spoiler")
+		}
 	}
 }

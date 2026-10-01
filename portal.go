@@ -1036,6 +1036,7 @@ func (portal *Portal) handleDeletedParts(intent *appservice.IntentAPI, msgID str
 		}
 		// The homeserver may include the latest edit in the bundled relations.
 		original := evt.Content.AsMessage()
+		originalRaw := evt.Content.Raw
 		raw, marshalErr := json.Marshal(evt.Unsigned)
 		var bundled struct {
 			Relations map[string]json.RawMessage `json:"m.relations"`
@@ -1046,6 +1047,7 @@ func (portal *Portal) handleDeletedParts(intent *appservice.IntentAPI, msgID str
 				_ = replacement.Content.ParseRaw(event.EventMessage)
 				if updated := replacement.Content.AsMessage().NewContent; updated != nil {
 					original = updated
+					originalRaw, _ = replacement.Content.Raw["m.new_content"].(map[string]any)
 				}
 			}
 		}
@@ -1055,7 +1057,7 @@ func (portal *Portal) handleDeletedParts(intent *appservice.IntentAPI, msgID str
 		if sender.UserID != evt.Sender {
 			sender = portal.bridge.AS.Intent(evt.Sender)
 		}
-		resp, err := portal.sendMatrixMessage(sender, event.EventMessage, content, nil, 0)
+		resp, err := portal.sendMatrixMessage(sender, event.EventMessage, content, spoilerEditExtra(originalRaw), 0)
 		if err != nil {
 			portal.log.Err(err).Str("event_id", part.MXID.String()).Msg("Failed to mark deleted message")
 			continue
@@ -1064,6 +1066,21 @@ func (portal *Portal) handleDeletedParts(intent *appservice.IntentAPI, msgID str
 		part.Delete()
 	}
 	return
+}
+
+// Spoiler metadata is stored in raw content, outside MessageEventContent. Keep it
+// on both the replacement and its fallback so deletion edits cannot reveal media.
+func spoilerEditExtra(original map[string]any) map[string]any {
+	if original[mediaSpoilerKey] != true {
+		return nil
+	}
+	newContent := map[string]any{mediaSpoilerKey: true}
+	extra := map[string]any{mediaSpoilerKey: true, "m.new_content": newContent}
+	if reason, ok := original[mediaSpoilerKey+".reason"].(string); ok {
+		newContent[mediaSpoilerKey+".reason"] = reason
+		extra[mediaSpoilerKey+".reason"] = reason
+	}
+	return extra
 }
 
 func (portal *Portal) redactAllParts(intent *appservice.IntentAPI, msgID string) (lastResp id.EventID) {
@@ -1757,7 +1774,7 @@ func (portal *Portal) handleMatrixMessage(sender *User, evt *event.Event) {
 			sendReq.Content, sendReq.AllowedMentions = portal.parseMatrixHTML(content, parseAllowedLinkPreviews(evt.Content.Raw))
 		}
 
-		if evt.Content.Raw["page.codeberg.everypizza.msc4193.spoiler"] == true {
+		if evt.Content.Raw[mediaSpoilerKey] == true {
 			filename = "SPOILER_" + filename
 		}
 

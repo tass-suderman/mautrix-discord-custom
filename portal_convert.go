@@ -47,6 +47,8 @@ type ConvertedMessage struct {
 	Extra   map[string]any
 }
 
+const mediaSpoilerKey = "page.codeberg.everypizza.msc4193.spoiler"
+
 func (portal *Portal) createMediaFailedMessage(bridgeErr error) *event.MessageEventContent {
 	return &event.MessageEventContent{
 		Body:    fmt.Sprintf("Failed to bridge media: %v", bridgeErr),
@@ -197,7 +199,7 @@ func (portal *Portal) convertDiscordAttachment(ctx context.Context, intent *apps
 	var extra = make(map[string]any)
 
 	if strings.HasPrefix(att.Filename, "SPOILER_") {
-		extra["page.codeberg.everypizza.msc4193.spoiler"] = true
+		extra[mediaSpoilerKey] = true
 	}
 
 	if att.Description != "" {
