@@ -65,10 +65,12 @@ components, and stickers.
 
 ### Media spoilers
 
-Discord attachments with a `SPOILER_` filename are marked with the
+Discord attachments with the `IS_SPOILER` flag (`flags & 8 != 0`) or a legacy
+`SPOILER_` filename are marked with the
 [MSC4193 media spoiler](https://github.com/matrix-org/matrix-spec-proposals/pull/4193)
 flag, `page.codeberg.everypizza.msc4193.spoiler: true`, including images. This
-flagging is inherited from upstream; this fork also preserves the flag and its
+filename detection is inherited from upstream; this fork adds attachment flag
+detection and also preserves the Matrix spoiler flag and its
 optional reason in deletion edits. A Matrix client must support media spoilers
 to hide the image; a spoiler on the text caption alone does not hide the media.
 

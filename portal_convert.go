@@ -49,6 +49,9 @@ type ConvertedMessage struct {
 
 const mediaSpoilerKey = "page.codeberg.everypizza.msc4193.spoiler"
 
+// The pinned discordgo version exposes flags but has no IS_SPOILER constant.
+const discordAttachmentFlagSpoiler discordgo.MessageAttachmentFlags = 1 << 3
+
 func (portal *Portal) createMediaFailedMessage(bridgeErr error) *event.MessageEventContent {
 	return &event.MessageEventContent{
 		Body:    fmt.Sprintf("Failed to bridge media: %v", bridgeErr),
@@ -198,7 +201,7 @@ func (portal *Portal) convertDiscordAttachment(ctx context.Context, intent *apps
 
 	var extra = make(map[string]any)
 
-	if strings.HasPrefix(att.Filename, "SPOILER_") {
+	if att.Flags&discordAttachmentFlagSpoiler != 0 || strings.HasPrefix(att.Filename, "SPOILER_") {
 		extra[mediaSpoilerKey] = true
 	}
 

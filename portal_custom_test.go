@@ -227,18 +227,35 @@ func TestDiscordAttachmentSpoiler(t *testing.T) {
 	portal.Key.ChannelID = "1"
 	portal.bridge.DMA.cfg.ServerName = "media.example"
 	for _, tc := range []struct {
+		name                  string
 		filename, description string
+		flags                 discordgo.MessageAttachmentFlags
 		spoiler               bool
 	}{
-		{"SPOILER_image.png", "", true},
-		{"SPOILER_image.png", "A caption", true},
-		{"image.png", "SPOILER_ in the caption", false},
+		{"legacy prefix", "SPOILER_image.png", "", 0, true},
+		{"legacy caption", "SPOILER_image.png", "A caption", 0, true},
+		{"spoiler flag", "image.png", "", 8, true},
+		{"flag with caption", "image.png", "A caption", 8, true},
+		{"combined flags", "image.png", "", 8 | 4 | 32, true},
+		{"unrelated flags", "image.png", "", 4 | 32, false},
+		{"plain", "image.png", "", 0, false},
+		{"caption prefix only", "image.png", "SPOILER_ in the caption", 0, false},
 	} {
-		t.Run(tc.filename+tc.description, func(t *testing.T) {
-			part := portal.convertDiscordAttachment(context.Background(), nil, "2", &discordgo.MessageAttachment{
-				ID: "3", Filename: tc.filename, Description: tc.description, ContentType: "image/png",
-				URL: "https://cdn.discordapp.com/attachments/1/3/image.png",
+		t.Run(tc.name, func(t *testing.T) {
+			// Decode the wire format so flag-based detection covers Discord JSON too.
+			attachmentJSON, err := json.Marshal(map[string]any{
+				"id": "3", "filename": tc.filename, "description": tc.description,
+				"content_type": "image/png", "flags": tc.flags,
+				"url": "https://cdn.discordapp.com/attachments/1/3/image.png",
 			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var attachment discordgo.MessageAttachment
+			if err := json.Unmarshal(attachmentJSON, &attachment); err != nil {
+				t.Fatal(err)
+			}
+			part := portal.convertDiscordAttachment(context.Background(), nil, "2", &attachment)
 			raw, err := json.Marshal(&event.Content{Parsed: part.Content, Raw: part.Extra})
 			if err != nil {
 				t.Fatal(err)
