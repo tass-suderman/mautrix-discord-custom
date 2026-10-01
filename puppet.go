@@ -28,7 +28,8 @@ type Puppet struct {
 	customIntent *appservice.IntentAPI
 	customUser   *User
 
-	syncLock sync.Mutex
+	syncLock     sync.Mutex
+	presenceLock sync.Mutex
 }
 
 var _ bridge.Ghost = (*Puppet)(nil)

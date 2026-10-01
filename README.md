@@ -100,9 +100,20 @@ The updated example configuration and normal template-based config upgrades use:
 bridge:
     klipy_gifs: true
     preserve_deleted_messages: true
+    sync_presence: true
 ```
 
-Both settings can be disabled independently. Docker images include FFmpeg and
+Each setting can be disabled independently. `sync_presence` forwards Discord
+presence and custom status messages to Matrix ghost users: online (including
+streaming and mobile online) becomes online, idle/do not disturb become unavailable,
+and invisible/offline become offline. Removed custom statuses clear the Matrix
+status message. Unicode status emoji are included; custom emoji use `:name:` text.
+The Matrix homeserver must enable presence, and clients must support displaying
+presence/status messages. Bot logins additionally need the Presence Intent enabled
+in the Discord developer portal. Invisible users appear offline to the bridge.
+Discord presence is only available for users the gateway exposes to the session.
+
+Docker images include FFmpeg and
 ImageMagick; native installations need `ffmpeg` and ImageMagick's `magick` command
 in addition to the upstream dependencies.
 

@@ -78,6 +78,10 @@ appservice:
 
 # Bridge config
 bridge:
+    # Forward Discord presence and custom status messages to Matrix ghosts.
+    # Requires Matrix homeserver presence support. Bot logins also require the
+    # Presence Intent to be enabled in the Discord developer portal.
+    sync_presence: true
     # Convert Klipy MP4 embeds to looping GIF images using ffmpeg.
     klipy_gifs: true
     # Keep Discord-deleted messages in Matrix with a Deleted message header.
