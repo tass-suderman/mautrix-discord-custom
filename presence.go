@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"maunium.net/go/mautrix/event"
@@ -38,24 +39,72 @@ func (user *User) presenceHandler(presence *discordgo.Presence) {
 	if !user.bridge.Config.Bridge.SyncPresence || presence == nil || presence.User == nil || presence.User.ID == "" {
 		return
 	}
-	puppet := user.bridge.GetPuppetByID(presence.User.ID)
+	status, message := discordPresence(presence)
+	user.presenceCacheLock.Lock()
+	defer user.presenceCacheLock.Unlock()
+	if user.presenceCache == nil {
+		user.presenceCache = make(map[string]cachedDiscordPresence)
+	}
+	cached := cachedDiscordPresence{status: status, message: message}
+	cached.sent = user.sendDiscordPresence(presence.User.ID, cached)
+	user.presenceCache[presence.User.ID] = cached
+}
+
+type cachedDiscordPresence struct {
+	status  event.Presence
+	message string
+	sent    bool
+}
+
+func (user *User) sendDiscordPresence(userID string, presence cachedDiscordPresence) bool {
+	puppet := user.bridge.GetPuppetByID(userID)
 	puppet.presenceLock.Lock()
 	defer puppet.presenceLock.Unlock()
-	status, message := discordPresence(presence)
 	intent := puppet.DefaultIntent()
 	if err := intent.EnsureRegistered(); err != nil {
 		puppet.log.Warn().Err(err).Msg("Failed to register ghost for presence update")
-		return
+		return false
 	}
 	// Always include status_msg, even when empty, to clear removed statuses.
 	// Use the ghost rather than the double puppet to avoid changing the Matrix
 	// user's own presence on other clients.
 	_, err := intent.MakeRequest("PUT", intent.BuildClientURL("v3", "presence", puppet.MXID, "status"), map[string]any{
-		"presence":   status,
-		"status_msg": message,
+		"presence":   presence.status,
+		"status_msg": presence.message,
 	}, nil)
 	if err != nil {
 		puppet.log.Warn().Err(err).Msg("Failed to forward Discord presence")
+	}
+	return err == nil
+}
+
+func (user *User) refreshDiscordPresence(session *discordgo.Session) {
+	// Matrix presence expires without continued activity; Discord sends
+	// changes rather than heartbeats for every online contact.
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		user.Lock()
+		currentSession := user.Session
+		user.Unlock()
+		if currentSession != session {
+			return
+		}
+		user.bridgeStateLock.Lock()
+		disconnected := user.wasDisconnected || user.wasLoggedOut
+		user.bridgeStateLock.Unlock()
+		if disconnected {
+			continue
+		}
+		user.presenceCacheLock.Lock()
+		for userID, presence := range user.presenceCache {
+			if presence.status == event.PresenceOffline && presence.sent {
+				continue
+			}
+			presence.sent = user.sendDiscordPresence(userID, presence)
+			user.presenceCache[userID] = presence
+		}
+		user.presenceCacheLock.Unlock()
 	}
 }
 
@@ -66,11 +115,11 @@ func (user *User) presencesHandler(presences []*discordgo.Presence) {
 }
 
 func (user *User) presenceEventHandler(evt *discordgo.Event) {
-	if !user.bridge.Config.Bridge.SyncPresence || evt.Type != "READY_SUPPLEMENTAL" {
+	if !user.bridge.Config.Bridge.SyncPresence || (evt.Type != "READY" && evt.Type != "READY_SUPPLEMENTAL") {
 		return
 	}
 	// The pinned discordgo version doesn't expose merged_presences in its
-	// ReadySupplemental type. Decode the raw event to get initial friend and
+	// Ready or ReadySupplemental types. Decode the raw event to get initial friend and
 	// guild presence for user logins.
 	presences, err := decodeSupplementalPresences(evt.RawData)
 	if err != nil {
@@ -78,6 +127,7 @@ func (user *User) presenceEventHandler(evt *discordgo.Event) {
 		return
 	}
 	user.presencesHandler(presences)
+	user.log.Debug().Str("event_type", evt.Type).Int("presence_count", len(presences)).Msg("Received initial Discord presences")
 }
 
 type supplementalPresence struct {

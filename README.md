@@ -112,6 +112,9 @@ The Matrix homeserver must enable presence, and clients must support displaying
 presence/status messages. Bot logins additionally need the Presence Intent enabled
 in the Discord developer portal. Invisible users appear offline to the bridge.
 Discord presence is only available for users the gateway exposes to the session.
+Initial statuses are read on login, and known online/away statuses are refreshed
+every 20 seconds while connected so they don't expire in Matrix between Discord
+updates. Failed presence writes are retried on that interval too.
 
 Docker images include FFmpeg and
 ImageMagick; native installations need `ffmpeg` and ImageMagick's `magick` command

@@ -74,6 +74,9 @@ type User struct {
 	// and "available" but not logically "ready" just yet.
 	relationshipsReady bool
 	relationshipLock   sync.RWMutex
+
+	presenceCacheLock sync.Mutex
+	presenceCache     map[string]cachedDiscordPresence
 }
 
 func (user *User) GetRemoteID() string {
@@ -565,6 +568,9 @@ const BotIntents = discordgo.IntentGuilds |
 
 func (user *User) Connect() error {
 	user.Lock()
+	user.presenceCacheLock.Lock()
+	user.presenceCache = make(map[string]cachedDiscordPresence)
+	user.presenceCacheLock.Unlock()
 	// Clear our in-memory relationship cache as it might've changed while
 	// offline; READY will repopulate it.
 	user.reconstructRelationships(nil)
@@ -648,6 +654,9 @@ func (user *User) Connect() error {
 			user.log.Warn().Err(err).Msg("Retrying initial connection in 5 seconds")
 			time.Sleep(5 * time.Second)
 			continue
+		}
+		if err == nil && user.bridge.Config.Bridge.SyncPresence {
+			go user.refreshDiscordPresence(session)
 		}
 		return err
 	}
