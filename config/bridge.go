@@ -28,6 +28,8 @@ import (
 )
 
 type BridgeConfig struct {
+	KlipyGIFs                 bool   `yaml:"klipy_gifs"`
+	PreserveDeletedMessages   bool   `yaml:"preserve_deleted_messages"`
 	UsernameTemplate          string `yaml:"username_template"`
 	DisplaynameTemplate       string `yaml:"displayname_template"`
 	ChannelNameTemplate       string `yaml:"channel_name_template"`

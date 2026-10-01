@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"reflect"
@@ -806,6 +807,37 @@ func (portal *Portal) sendThreadCreationNotice(ctx context.Context, thread *Thre
 	}
 }
 
+// Embed classification must use the same message context as initial conversion.
+func removedDiscordParts(msg *discordgo.Message, existing []*database.Message) map[string]*database.Message {
+	attachmentMap := map[string]*database.Message{}
+	for _, existingPart := range existing {
+		if existingPart.AttachmentID != "" {
+			attachmentMap[existingPart.AttachmentID] = existingPart
+		}
+	}
+	for _, remainingAttachment := range msg.Attachments {
+		if _, found := attachmentMap[remainingAttachment.ID]; found {
+			delete(attachmentMap, remainingAttachment.ID)
+		}
+	}
+	for _, remainingSticker := range msg.StickerItems {
+		if _, found := attachmentMap[remainingSticker.ID]; found {
+			delete(attachmentMap, remainingSticker.ID)
+		}
+	}
+	for _, remainingEmbed := range msg.Embeds {
+		// Other types of embeds are sent inline with the text message part
+		if getEmbedType(msg, remainingEmbed) != EmbedVideo {
+			continue
+		}
+		embedID := "video_" + remainingEmbed.URL
+		if _, found := attachmentMap[embedID]; found {
+			delete(attachmentMap, embedID)
+		}
+	}
+	return attachmentMap
+}
+
 func (portal *Portal) handleDiscordMessageUpdate(user *User, msg *discordgo.Message) {
 	log := portal.log.With().
 		Str("message_id", msg.ID).
@@ -844,14 +876,17 @@ func (portal *Portal) handleDiscordMessageUpdate(user *User, msg *discordgo.Mess
 			return
 		}
 		log.Debug().Msg("Found original message in cache for edit without author")
-		if len(msg.Embeds) > 0 {
+		if msg.Embeds != nil {
 			creationMessage.Embeds = msg.Embeds
 		}
-		if len(msg.Attachments) > 0 {
+		if msg.Attachments != nil {
 			creationMessage.Attachments = msg.Attachments
 		}
-		if len(msg.Components) > 0 {
+		if msg.Components != nil {
 			creationMessage.Components = msg.Components
+		}
+		if msg.StickerItems != nil {
+			creationMessage.StickerItems = msg.StickerItems
 		}
 		// TODO are there other fields that need copying?
 		msg = creationMessage
@@ -870,32 +905,7 @@ func (portal *Portal) handleDiscordMessageUpdate(user *User, msg *discordgo.Mess
 	intent := puppet.IntentFor(portal)
 
 	redactions := zerolog.Dict()
-	attachmentMap := map[string]*database.Message{}
-	for _, existingPart := range existing {
-		if existingPart.AttachmentID != "" {
-			attachmentMap[existingPart.AttachmentID] = existingPart
-		}
-	}
-	for _, remainingAttachment := range msg.Attachments {
-		if _, found := attachmentMap[remainingAttachment.ID]; found {
-			delete(attachmentMap, remainingAttachment.ID)
-		}
-	}
-	for _, remainingSticker := range msg.StickerItems {
-		if _, found := attachmentMap[remainingSticker.ID]; found {
-			delete(attachmentMap, remainingSticker.ID)
-		}
-	}
-	for _, remainingEmbed := range msg.Embeds {
-		// Other types of embeds are sent inline with the text message part
-		if getEmbedType(nil, remainingEmbed) != EmbedVideo {
-			continue
-		}
-		embedID := "video_" + remainingEmbed.URL
-		if _, found := attachmentMap[embedID]; found {
-			delete(attachmentMap, embedID)
-		}
-	}
+	attachmentMap := removedDiscordParts(msg, existing)
 	for _, deletedAttachment := range attachmentMap {
 		resp, err := intent.RedactEvent(portal.MXID, deletedAttachment.MXID)
 		if err != nil {
@@ -958,7 +968,7 @@ func (portal *Portal) handleDiscordMessageUpdate(user *User, msg *discordgo.Mess
 }
 
 func (portal *Portal) handleDiscordMessageDelete(user *User, msg *discordgo.Message) {
-	lastResp := portal.redactAllParts(portal.MainIntent(), msg.ID)
+	lastResp := portal.handleDeletedParts(portal.MainIntent(), msg.ID)
 	if lastResp != "" {
 		portal.sendDeliveryReceipt(lastResp)
 	}
@@ -968,7 +978,7 @@ func (portal *Portal) handleDiscordMessageDeleteBulk(user *User, messages []stri
 	intent := portal.MainIntent()
 	var lastResp id.EventID
 	for _, msgID := range messages {
-		newLastResp := portal.redactAllParts(intent, msgID)
+		newLastResp := portal.handleDeletedParts(intent, msgID)
 		if newLastResp != "" {
 			lastResp = newLastResp
 		}
@@ -976,6 +986,84 @@ func (portal *Portal) handleDiscordMessageDeleteBulk(user *User, messages []stri
 	if lastResp != "" {
 		portal.sendDeliveryReceipt(lastResp)
 	}
+}
+
+// Preserve original media URLs and thread relations when marking deleted messages.
+func deletedMessageContent(original *event.MessageEventContent, posted, deleted time.Time) *event.MessageEventContent {
+	content := *original
+	content.NewContent = nil
+	header := "Deleted message (" + formatDeletionDelay(deleted.Sub(posted)) + ")"
+	content.Body = header + "\n\n" + original.Body
+	body := original.FormattedBody
+	if original.Format != event.FormatHTML || body == "" {
+		body = strings.ReplaceAll(html.EscapeString(original.Body), "\n", "<br>")
+	}
+	content.Format = event.FormatHTML
+	content.FormattedBody = "<h4>" + html.EscapeString(header) + "</h4><blockquote>" + body + "</blockquote>"
+	content.Mentions = &event.Mentions{}
+	return &content
+}
+
+func formatDeletionDelay(delay time.Duration) string {
+	if delay < 0 {
+		delay = 0
+	}
+	seconds := int64(delay / time.Second)
+	parts := []string{}
+	for _, unit := range []struct {
+		size  int64
+		label string
+	}{{86400, "day"}, {3600, "hr"}, {60, "min"}} {
+		if n := seconds / unit.size; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d%s", n, unit.label))
+			seconds %= unit.size
+		}
+	}
+	parts = append(parts, fmt.Sprintf("%dsec", seconds))
+	return strings.Join(parts, ", ")
+}
+
+func (portal *Portal) handleDeletedParts(intent *appservice.IntentAPI, msgID string) (lastResp id.EventID) {
+	if !portal.bridge.Config.Bridge.PreserveDeletedMessages {
+		return portal.redactAllParts(intent, msgID)
+	}
+	deletedAt := time.Now()
+	for _, part := range portal.bridge.DB.Message.GetByDiscordID(portal.Key, msgID) {
+		evt, err := portal.getEvent(part.MXID)
+		if err != nil {
+			portal.log.Err(err).Str("event_id", part.MXID.String()).Msg("Failed to fetch deleted message; leaving Matrix content intact")
+			continue
+		}
+		// The homeserver may include the latest edit in the bundled relations.
+		original := evt.Content.AsMessage()
+		raw, marshalErr := json.Marshal(evt.Unsigned)
+		var bundled struct {
+			Relations map[string]json.RawMessage `json:"m.relations"`
+		}
+		if marshalErr == nil && json.Unmarshal(raw, &bundled) == nil {
+			var replacement event.Event
+			if rawEdit := bundled.Relations["m.replace"]; rawEdit != nil && json.Unmarshal(rawEdit, &replacement) == nil {
+				_ = replacement.Content.ParseRaw(event.EventMessage)
+				if updated := replacement.Content.AsMessage().NewContent; updated != nil {
+					original = updated
+				}
+			}
+		}
+		content := deletedMessageContent(original, part.Timestamp, deletedAt)
+		content.SetEdit(part.MXID)
+		sender := portal.bridge.GetPuppetByID(part.SenderID).IntentFor(portal)
+		if sender.UserID != evt.Sender {
+			sender = portal.bridge.AS.Intent(evt.Sender)
+		}
+		resp, err := portal.sendMatrixMessage(sender, event.EventMessage, content, nil, 0)
+		if err != nil {
+			portal.log.Err(err).Str("event_id", part.MXID.String()).Msg("Failed to mark deleted message")
+			continue
+		}
+		lastResp = resp.EventID
+		part.Delete()
+	}
+	return
 }
 
 func (portal *Portal) redactAllParts(intent *appservice.IntentAPI, msgID string) (lastResp id.EventID) {

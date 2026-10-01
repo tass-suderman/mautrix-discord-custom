@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"image"
+	_ "image/gif"
+	_ "image/png"
 	"io"
 	"net/http"
 	"os"
@@ -180,7 +183,119 @@ type AttachmentMeta struct {
 	MimeType      string
 	EmojiName     string
 	CopyIfMissing bool
+	ConversionKey string
 	Converter     func([]byte) ([]byte, string, error)
+}
+
+// convertKlipyGIF uses local files so ffmpeg can seek in MP4 inputs.
+func (br *DiscordBridge) convertKlipyGIF(data []byte) ([]byte, string, error) {
+	dir, err := os.MkdirTemp("", "mautrix-discord-gif-*")
+	if err != nil {
+		return nil, "", err
+	}
+	defer os.RemoveAll(dir)
+	input, output := filepath.Join(dir, "input.mp4"), filepath.Join(dir, "output.gif")
+	if err = os.WriteFile(input, data, 0600); err != nil {
+		return nil, "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	filter := "fps=15,scale=480:480:force_original_aspect_ratio=decrease:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse"
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-v", "error", "-i", input, "-filter_complex_threads", "1", "-filter_complex", filter, "-an", "-loop", "0", "-fs", strconv.FormatInt(br.MediaConfig.UploadSize+1, 10), output)
+	if log, err := cmd.CombinedOutput(); err != nil {
+		return nil, "", fmt.Errorf("ffmpeg: %w: %s", err, log)
+	}
+	info, err := os.Stat(output)
+	if err != nil {
+		return nil, "", err
+	}
+	if info.Size() > br.MediaConfig.UploadSize {
+		return nil, "", fmt.Errorf("converted GIF exceeds upload size limit")
+	}
+	result, err := os.ReadFile(output)
+	return result, "image/gif", err
+}
+
+// Convert GIF stickers to animated PNG for clients whose sticker renderer rejects GIF.
+func (br *DiscordBridge) convertGIFSticker(data []byte) ([]byte, string, error) {
+	dir, err := os.MkdirTemp("", "mautrix-discord-sticker-*")
+	if err != nil {
+		return nil, "", err
+	}
+	defer os.RemoveAll(dir)
+	input, output := filepath.Join(dir, "input.gif"), filepath.Join(dir, "output.png")
+	if err = os.WriteFile(input, data, 0600); err != nil {
+		return nil, "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-v", "error", "-ignore_loop", "1", "-i", input, "-an", "-plays", "0", "-f", "apng", "-fs", strconv.FormatInt(br.MediaConfig.UploadSize+1, 10), output)
+	if log, err := cmd.CombinedOutput(); err != nil {
+		return nil, "", fmt.Errorf("ffmpeg: %w: %s", err, log)
+	}
+	info, err := os.Stat(output)
+	if err != nil {
+		return nil, "", err
+	}
+	if info.Size() > br.MediaConfig.UploadSize {
+		return nil, "", fmt.Errorf("converted sticker exceeds upload size limit")
+	}
+	result, err := os.ReadFile(output)
+	return result, "image/png", err
+}
+
+// ANIM is a top-level RIFF chunk, not an arbitrary byte sequence inside a frame.
+func isAnimatedWebP(data []byte) bool {
+	if len(data) < 12 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		return false
+	}
+	limit := uint64(binary.LittleEndian.Uint32(data[4:8])) + 8
+	if limit > uint64(len(data)) || limit < 12 {
+		return false
+	}
+	for offset := uint64(12); offset+8 <= limit; {
+		size := uint64(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+		end := offset + 8 + size
+		if end > limit {
+			return false
+		}
+		if string(data[offset:offset+4]) == "ANIM" && size == 6 {
+			return true
+		}
+		offset = end + size%2
+	}
+	return false
+}
+
+// ImageMagick decodes all WebP animation frames, including blend/disposal operations.
+func (br *DiscordBridge) convertWebPGIF(data []byte) ([]byte, string, error) {
+	if !isAnimatedWebP(data) {
+		return data, mimetype.Detect(data).String(), nil
+	}
+	dir, err := os.MkdirTemp("", "mautrix-discord-webp-*")
+	if err != nil {
+		return nil, "", err
+	}
+	defer os.RemoveAll(dir)
+	input, output := filepath.Join(dir, "input.webp"), filepath.Join(dir, "output.gif")
+	if err = os.WriteFile(input, data, 0600); err != nil {
+		return nil, "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "magick", "-limit", "memory", "128MiB", "-limit", "map", "256MiB", "-limit", "disk", "512MiB", "webp:"+input, "-coalesce", "-resize", "480x480>", "-layers", "Optimize", "-loop", "0", output)
+	if log, err := cmd.CombinedOutput(); err != nil {
+		return nil, "", fmt.Errorf("ImageMagick: %w: %s", err, log)
+	}
+	info, err := os.Stat(output)
+	if err != nil {
+		return nil, "", err
+	}
+	if info.Size() > br.MediaConfig.UploadSize {
+		return nil, "", fmt.Errorf("converted WebP GIF exceeds upload size limit")
+	}
+	result, err := os.ReadFile(output)
+	return result, "image/gif", err
 }
 
 var NoMeta = AttachmentMeta{}
@@ -270,13 +385,19 @@ func (br *DiscordBridge) convertLottie(data []byte) ([]byte, string, error) {
 
 func (br *DiscordBridge) copyAttachmentToMatrix(intent *appservice.IntentAPI, url string, encrypt bool, meta AttachmentMeta) (returnDBFile *database.File, returnErr error) {
 	isCacheable := br.Config.Bridge.CacheMedia != "never" && (br.Config.Bridge.CacheMedia == "always" || !encrypt)
-	returnDBFile = br.DB.File.Get(url, encrypt)
+	cacheURL := url
+	if meta.ConversionKey != "" {
+		cacheURL += "#mautrix-discord-" + meta.ConversionKey
+	}
+	returnDBFile = br.DB.File.Get(cacheURL, encrypt)
 	if returnDBFile == nil {
-		transferKey := attachmentKey{url, encrypt}
+		transferKey := attachmentKey{cacheURL, encrypt}
 		once, _ := br.attachmentTransfers.GetOrSet(transferKey, &exsync.ReturnableOnce[*database.File]{})
 		returnDBFile, returnErr = once.Do(func() (onceDBFile *database.File, onceErr error) {
+			// Only deduplicate concurrent transfers: failures must be retried on later messages.
+			defer br.attachmentTransfers.Delete(transferKey)
 			if isCacheable {
-				onceDBFile = br.DB.File.Get(url, encrypt)
+				onceDBFile = br.DB.File.Get(cacheURL, encrypt)
 				if onceDBFile != nil {
 					return
 				}
@@ -313,14 +434,13 @@ func (br *DiscordBridge) copyAttachmentToMatrix(intent *appservice.IntentAPI, ur
 				}
 			}
 
-			onceDBFile, onceErr = br.uploadMatrixAttachment(intent, data, url, encrypt, meta, &semaWg)
+			onceDBFile, onceErr = br.uploadMatrixAttachment(intent, data, cacheURL, encrypt, meta, &semaWg)
 			if onceErr != nil {
 				return
 			}
 			if isCacheable {
 				onceDBFile.Insert(nil)
 			}
-			br.attachmentTransfers.Delete(transferKey)
 			return
 		})
 	}

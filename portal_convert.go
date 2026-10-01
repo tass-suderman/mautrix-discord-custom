@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -60,13 +61,20 @@ func (portal *Portal) convertDiscordFile(ctx context.Context, typeName string, i
 	if typeName == "sticker" && content.Info.MimeType == "application/json" {
 		meta.Converter = portal.bridge.convertLottie
 	}
+	if typeName == "sticker" && content.Info.MimeType == "image/gif" {
+		meta.Converter = portal.bridge.convertGIFSticker
+		meta.ConversionKey = "gif-sticker-apng-v1"
+	}
 	dbFile, err := portal.bridge.copyAttachmentToMatrix(intent, url, portal.Encrypted, meta)
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to copy attachment to Matrix")
 		return portal.createMediaFailedMessage(err)
 	}
-	if typeName == "sticker" && content.Info.MimeType == "application/json" {
+	if meta.Converter != nil {
 		content.Info.MimeType = dbFile.MimeType
+		if meta.ConversionKey == "gif-sticker-apng-v1" {
+			content.Info.MimeType = "image/png"
+		}
 	}
 	content.Info.Size = dbFile.Size
 	if content.Info.Width == 0 && content.Info.Height == 0 {
@@ -105,6 +113,32 @@ func (portal *Portal) cleanupConvertedStickerInfo(content *event.MessageEventCon
 	}
 }
 
+// Discord serves GIF stickers from the media proxy rather than the CDN.
+func discordStickerURL(stickerID string, format discordgo.StickerFormat) string {
+	if format == discordgo.StickerFormatTypeGIF {
+		return "https://media.discordapp.net/stickers/" + stickerID + ".gif"
+	}
+	return discordgo.EndpointStickerImage(stickerID, format)
+}
+
+// Prefer the original WebP to a thumbnail proxy that may only contain a still frame.
+func originalWebPEmbedURL(embed *discordgo.MessageEmbed) string {
+	candidates := []string{embed.URL}
+	if embed.Image != nil {
+		candidates = append(candidates, embed.Image.URL)
+	}
+	if embed.Thumbnail != nil {
+		candidates = append(candidates, embed.Thumbnail.URL)
+	}
+	for _, candidate := range candidates {
+		parsed, err := url.Parse(candidate)
+		if err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") && parsed.Hostname() != "" && strings.HasSuffix(strings.ToLower(parsed.Path), ".webp") {
+			return candidate
+		}
+	}
+	return ""
+}
+
 func (portal *Portal) convertDiscordSticker(ctx context.Context, intent *appservice.IntentAPI, sticker *discordgo.StickerItem) *ConvertedMessage {
 	var mime string
 	switch sticker.FormatType {
@@ -131,12 +165,15 @@ func (portal *Portal) convertDiscordSticker(ctx context.Context, intent *appserv
 
 	mxc := portal.bridge.DMA.StickerMXC(sticker.ID, sticker.FormatType)
 	// TODO add config option to use direct media even for lottie stickers
-	if mxc.IsEmpty() && mime != "application/json" {
-		content = portal.convertDiscordFile(ctx, "sticker", intent, sticker.ID, sticker.URL(), content)
+	if mxc.IsEmpty() || mime == "image/gif" || mime == "application/json" {
+		content = portal.convertDiscordFile(ctx, "sticker", intent, sticker.ID, discordStickerURL(sticker.ID, sticker.FormatType), content)
 	} else {
 		content.URL = mxc.CUString()
 	}
 	portal.cleanupConvertedStickerInfo(content)
+	if content.MsgType == event.MsgNotice {
+		return &ConvertedMessage{AttachmentID: sticker.ID, Type: event.EventMessage, Content: content}
+	}
 	return &ConvertedMessage{
 		AttachmentID: sticker.ID,
 		Type:         event.EventSticker,
@@ -199,10 +236,42 @@ func (portal *Portal) convertDiscordAttachment(ctx context.Context, intent *apps
 	}
 }
 
+func isKlipyMP4(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if strings.HasPrefix(parsed.Hostname(), "images-ext-") && strings.HasSuffix(parsed.Hostname(), ".discordapp.net") {
+		_, nested, ok := strings.Cut(parsed.Path, "/https/")
+		if !ok {
+			return false
+		}
+		parsed, err = url.Parse("https://" + nested)
+		if err != nil {
+			return false
+		}
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return (host == "klipy.com" || strings.HasSuffix(host, ".klipy.com")) && strings.HasSuffix(strings.ToLower(parsed.Path), ".mp4")
+}
+
+func webPThumbnailFallback(embed *discordgo.MessageEmbed, originalURL string) string {
+	if embed.Thumbnail != nil && embed.Thumbnail.ProxyURL != "" && embed.Thumbnail.ProxyURL != originalURL {
+		return embed.Thumbnail.ProxyURL
+	}
+	if embed.Image != nil && embed.Image.ProxyURL != "" && embed.Image.ProxyURL != originalURL {
+		return embed.Image.ProxyURL
+	}
+	return ""
+}
+
 func (portal *Portal) convertDiscordVideoEmbed(ctx context.Context, intent *appservice.IntentAPI, embed *discordgo.MessageEmbed) *ConvertedMessage {
 	attachmentID := fmt.Sprintf("video_%s", embed.URL)
 	var proxyURL string
-	if embed.Video != nil {
+	webpURL := originalWebPEmbedURL(embed)
+	if webpURL != "" {
+		proxyURL = webpURL
+	} else if embed.Video != nil {
 		proxyURL = embed.Video.ProxyURL
 	} else if embed.Thumbnail != nil {
 		proxyURL = embed.Thumbnail.ProxyURL
@@ -217,7 +286,22 @@ func (portal *Portal) convertDiscordVideoEmbed(ctx context.Context, intent *apps
 			},
 		}
 	}
-	dbFile, err := portal.bridge.copyAttachmentToMatrix(intent, proxyURL, portal.Encrypted, NoMeta)
+	meta := NoMeta
+	if webpURL != "" {
+		proxyURL = webpURL
+		meta = AttachmentMeta{MimeType: "image/gif", ConversionKey: "webp-animation-v2", Converter: portal.bridge.convertWebPGIF}
+	}
+	convertGIF := portal.bridge.Config.Bridge.KlipyGIFs && isKlipyMP4(proxyURL)
+	if convertGIF {
+		meta = AttachmentMeta{MimeType: "image/gif", ConversionKey: "klipy-gif-v1", Converter: portal.bridge.convertKlipyGIF}
+	}
+	dbFile, err := portal.bridge.copyAttachmentToMatrix(intent, proxyURL, portal.Encrypted, meta)
+	if err != nil && webpURL != "" {
+		if fallbackURL := webPThumbnailFallback(embed, webpURL); fallbackURL != "" {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("original_url", webpURL).Msg("Failed to bridge original WebP; falling back to Discord thumbnail")
+			dbFile, err = portal.bridge.copyAttachmentToMatrix(intent, fallbackURL, portal.Encrypted, NoMeta)
+		}
+	}
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to copy video embed to Matrix")
 		return &ConvertedMessage{
@@ -234,14 +318,19 @@ func (portal *Portal) convertDiscordVideoEmbed(ctx context.Context, intent *apps
 			Size:     dbFile.Size,
 		},
 	}
-	if embed.Video != nil {
+	if embed.Video != nil && webpURL == "" {
 		content.MsgType = event.MsgVideo
 		content.Info.Width = embed.Video.Width
 		content.Info.Height = embed.Video.Height
 	} else {
 		content.MsgType = event.MsgImage
-		content.Info.Width = embed.Thumbnail.Width
-		content.Info.Height = embed.Thumbnail.Height
+		if embed.Thumbnail != nil {
+			content.Info.Width = embed.Thumbnail.Width
+			content.Info.Height = embed.Thumbnail.Height
+		} else if embed.Image != nil {
+			content.Info.Width = embed.Image.Width
+			content.Info.Height = embed.Image.Height
+		}
 	}
 	if content.Info.Width == 0 && content.Info.Height == 0 {
 		content.Info.Width = dbFile.Width
@@ -254,6 +343,11 @@ func (portal *Portal) convertDiscordVideoEmbed(ctx context.Context, intent *apps
 		}
 	} else {
 		content.URL = dbFile.MXC.CUString()
+	}
+	if convertGIF || (webpURL != "" && dbFile.MimeType == "image/gif") {
+		content.MsgType = event.MsgImage
+		content.Body = "animation.gif"
+		content.Info.Width, content.Info.Height = dbFile.Width, dbFile.Height
 	}
 	extra := map[string]any{}
 	if content.MsgType == event.MsgVideo && embed.Type == discordgo.EmbedTypeGifv {

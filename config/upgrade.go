@@ -25,6 +25,8 @@ import (
 
 func DoUpgrade(helper *up.Helper) {
 	bridgeconfig.Upgrader.DoUpgrade(helper)
+	helper.Copy(up.Bool, "bridge", "klipy_gifs")
+	helper.Copy(up.Bool, "bridge", "preserve_deleted_messages")
 
 	helper.Copy(up.Str, "bridge", "username_template")
 	helper.Copy(up.Str, "bridge", "displayname_template")

@@ -3,7 +3,7 @@ FROM alpine:3.24
 ENV UID=1337 \
     GID=1337
 
-RUN apk add --no-cache ffmpeg su-exec ca-certificates bash jq curl yq-go lottieconverter
+RUN apk add --no-cache ffmpeg imagemagick su-exec ca-certificates bash jq curl yq-go lottieconverter
 
 ARG EXECUTABLE=./mautrix-discord
 COPY $EXECUTABLE /usr/bin/mautrix-discord

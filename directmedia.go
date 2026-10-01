@@ -453,7 +453,7 @@ func (dma *DirectMediaAPI) getMediaURL(ctx context.Context, encodedMediaID strin
 			url = discordgo.EndpointEmoji(strconv.FormatUint(mediaData.EmojiID, 10))
 		}
 	case *StickerMediaData:
-		url = discordgo.EndpointStickerImage(
+		url = discordStickerURL(
 			strconv.FormatUint(mediaData.StickerID, 10),
 			discordgo.StickerFormat(mediaData.Format),
 		)

@@ -78,6 +78,10 @@ appservice:
 
 # Bridge config
 bridge:
+    # Convert Klipy MP4 embeds to looping GIF images using ffmpeg.
+    klipy_gifs: true
+    # Keep Discord-deleted messages in Matrix with a Deleted message header.
+    preserve_deleted_messages: true
     # Localpart template of MXIDs for Discord users.
     # {{.}} is replaced with the internal ID of the Discord user.
     username_template: discord_{{.}}
