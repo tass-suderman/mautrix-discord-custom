@@ -50,6 +50,7 @@ type BridgeConfig struct {
 	EmbedFieldsAsTables         bool `yaml:"embed_fields_as_tables"`
 	MuteChannelsOnCreate        bool `yaml:"mute_channels_on_create"`
 	SyncDirectChatList          bool `yaml:"sync_direct_chat_list"`
+	SyncPresence                bool `yaml:"sync_presence"`
 	ResendBridgeInfo            bool `yaml:"resend_bridge_info"`
 	CustomEmojiReactions        bool `yaml:"custom_emoji_reactions"`
 	DeletePortalOnChannelDelete bool `yaml:"delete_portal_on_channel_delete"`

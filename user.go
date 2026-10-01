@@ -627,6 +627,9 @@ func (user *User) Connect() error {
 	}
 	if !session.IsUser {
 		session.Identify.Intents = BotIntents
+		if user.bridge.Config.Bridge.SyncPresence {
+			session.Identify.Intents |= discordgo.IntentGuildPresences
+		}
 	}
 	session.EventHandler = user.eventHandlerSync
 
@@ -667,6 +670,12 @@ func (user *User) eventHandler(rawEvt any) {
 	switch evt := rawEvt.(type) {
 	case *discordgo.Ready:
 		user.readyHandler(evt)
+	case *discordgo.PresenceUpdate:
+		user.presenceHandler(&evt.Presence)
+	case *discordgo.PresencesReplace:
+		user.presencesHandler(*evt)
+	case *discordgo.GuildMembersChunk:
+		user.presencesHandler(evt.Presences)
 	case *discordgo.Resumed:
 		user.resumeHandler(evt)
 	case *discordgo.Connect:
@@ -724,7 +733,7 @@ func (user *User) eventHandler(rawEvt any) {
 	case *discordgo.ThreadListSync:
 		user.threadListSyncHandler(evt)
 	case *discordgo.Event:
-		// Ignore
+		user.presenceEventHandler(evt)
 	default:
 		user.log.Debug().Type("event_type", evt).Msg("Unhandled event")
 	}
@@ -798,6 +807,7 @@ func (user *User) readyHandler(r *discordgo.Ready) {
 	user.tryAutomaticDoublePuppeting()
 
 	user.reconstructRelationships(r.Relationships)
+	user.presencesHandler(r.Presences)
 
 	updateTS := time.Now()
 	portalsInSpace := make(map[string]bool)
@@ -1029,6 +1039,7 @@ func (user *User) handleGuildRoles(guildID string, newRoles []*discordgo.Role) {
 }
 
 func (user *User) handleGuild(meta *discordgo.Guild, timestamp time.Time, isInSpace bool) {
+	user.presencesHandler(meta.Presences)
 	guild := user.bridge.GetGuildByID(meta.ID, true)
 	guild.UpdateInfo(user, meta)
 	if len(meta.Channels) > 0 {
