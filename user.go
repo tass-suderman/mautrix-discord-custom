@@ -685,6 +685,11 @@ func (user *User) eventHandler(rawEvt any) {
 		user.presencesHandler(*evt)
 	case *discordgo.GuildMembersChunk:
 		user.presencesHandler(evt.Presences)
+		for _, member := range evt.Members {
+			user.updateGuildMemberProfile(evt.GuildID, member)
+		}
+	case *discordgo.GuildMemberUpdate:
+		user.updateGuildMemberProfile(evt.GuildID, evt.Member)
 	case *discordgo.Resumed:
 		user.resumeHandler(evt)
 	case *discordgo.Connect:
@@ -745,6 +750,19 @@ func (user *User) eventHandler(rawEvt any) {
 		user.presenceEventHandler(evt)
 	default:
 		user.log.Debug().Type("event_type", evt).Msg("Unhandled event")
+	}
+}
+
+func (user *User) updateGuildMemberProfile(guildID string, member *discordgo.Member) {
+	if member == nil || member.User == nil {
+		return
+	}
+	puppet := user.bridge.GetPuppetByID(member.User.ID)
+	puppet.UpdateInfo(user, member.User, nil)
+	for _, portal := range user.bridge.GetAllPortalsInGuild(guildID) {
+		if portal.MXID != "" && user.bridge.StateStore.IsInRoom(portal.MXID, puppet.MXID) {
+			puppet.UpdateRoomProfile(user, portal, member)
+		}
 	}
 }
 

@@ -374,6 +374,12 @@ func (portal *Portal) convertDiscordVideoEmbed(ctx context.Context, intent *apps
 }
 
 func (portal *Portal) convertDiscordMessage(ctx context.Context, puppet *Puppet, intent *appservice.IntentAPI, msg *discordgo.Message) []*ConvertedMessage {
+	// REST history responses may omit guild_id even when member data is present.
+	if msg.GuildID == "" && portal.GuildID != "" {
+		copy := *msg
+		copy.GuildID = portal.GuildID
+		msg = &copy
+	}
 	predictedLength := len(msg.Attachments) + len(msg.StickerItems)
 	if msg.Content != "" {
 		predictedLength++

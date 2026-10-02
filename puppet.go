@@ -12,6 +12,7 @@ import (
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/bridge"
+	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
 	"go.mau.fi/mautrix-discord/database"
@@ -184,6 +185,54 @@ func (puppet *Puppet) CustomIntent() *appservice.IntentAPI {
 		return nil
 	}
 	return puppet.customIntent
+}
+
+// UpdateRoomProfile keeps guild-specific profiles in room membership rather than
+// changing the ghost's global profile (which is also used in DMs).
+func (puppet *Puppet) UpdateRoomProfile(source *User, portal *Portal, member *discordgo.Member) {
+	if portal.GuildID == "" || portal.MXID == "" || puppet.IsWebhook || puppet.IntentFor(portal) != puppet.DefaultIntent() {
+		return
+	}
+	if member == nil && source != nil && source.Session != nil {
+		member, _ = source.Session.State.Member(portal.GuildID, puppet.ID)
+		if member == nil {
+			member, _ = source.Session.GuildMember(portal.GuildID, puppet.ID)
+		}
+	}
+	if member == nil {
+		return
+	}
+	puppet.syncLock.Lock()
+	defer puppet.syncLock.Unlock()
+	name, avatar := puppet.Name, puppet.AvatarURL
+	if member.Nick != "" {
+		name = member.Nick
+	}
+	if member.Avatar != "" {
+		var err error
+		avatar, _, err = puppet.bridge.reuploadUserAvatar(puppet.DefaultIntent(), portal.GuildID, puppet.ID, member.Avatar)
+		if err != nil {
+			puppet.log.Warn().Err(err).Msg("Failed to upload guild member avatar")
+			return
+		}
+	}
+	intent := puppet.DefaultIntent()
+	if err := intent.EnsureJoined(portal.MXID); err != nil {
+		puppet.log.Warn().Err(err).Msg("Failed to join room for guild member profile")
+		return
+	}
+	current := puppet.bridge.StateStore.GetMember(portal.MXID, puppet.MXID)
+	if current != nil && current.Displayname == name && current.AvatarURL == avatar.CUString() {
+		return
+	}
+	content := event.MemberEventContent{Membership: event.MembershipJoin, Displayname: name, AvatarURL: avatar.CUString()}
+	if current != nil {
+		content = *current
+		content.Displayname, content.AvatarURL = name, avatar.CUString()
+	}
+	if _, err := intent.SendStateEvent(portal.MXID, event.StateMember, puppet.MXID.String(), &content); err != nil {
+		puppet.log.Warn().Err(err).Msg("Failed to update guild room member profile")
+	}
 }
 
 func (puppet *Puppet) updatePortalMeta(meta func(portal *Portal)) {

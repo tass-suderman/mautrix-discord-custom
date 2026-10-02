@@ -644,6 +644,7 @@ func (portal *Portal) handleDiscordMessageCreate(user *User, msg *discordgo.Mess
 	handlingStartTime := time.Now()
 	puppet := portal.bridge.GetPuppetByID(msg.Author.ID)
 	puppet.UpdateInfo(user, msg.Author, msg)
+	puppet.UpdateRoomProfile(user, portal, msg.Member)
 	intent := puppet.IntentFor(portal)
 
 	var discordThreadID string
@@ -2139,6 +2140,9 @@ func (portal *Portal) handleDiscordReaction(user *User, reaction *discordgo.Mess
 	puppet := portal.bridge.GetPuppetByID(reaction.UserID)
 	if member != nil {
 		puppet.UpdateInfo(user, member.User, nil)
+	}
+	if add {
+		puppet.UpdateRoomProfile(user, portal, member)
 	}
 	intent := puppet.IntentFor(portal)
 
