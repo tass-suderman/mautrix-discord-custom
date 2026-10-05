@@ -74,6 +74,9 @@ type Portal struct {
 	commands     map[string]*discordgo.ApplicationCommand
 	commandsLock sync.RWMutex
 
+	expressionLock sync.Mutex
+	expressionPack *discordExpressionPack
+
 	forwardBackfillLock sync.Mutex
 
 	currentlyTyping     []id.UserID
@@ -524,6 +527,13 @@ func (portal *Portal) CreateMatrixRoom(user *User, channel *discordgo.Channel) e
 	portal.bridge.portalsLock.Unlock()
 	portal.Update()
 	portal.log.Info().Msg("Matrix room created")
+	if portal.GuildID != "" && user.Session != nil {
+		if guild, err := user.Session.State.Guild(portal.GuildID); err == nil {
+			if err = portal.syncExpressions(guild); err != nil {
+				portal.log.Warn().Err(err).Msg("Failed to publish Discord expression pack")
+			}
+		}
+	}
 
 	if portal.Encrypted && portal.IsPrivateChat() {
 		err = portal.bridge.Bot.EnsureJoined(portal.MXID, appservice.EnsureJoinedParams{BotOverride: portal.MainIntent().Client})
@@ -1725,13 +1735,19 @@ func (portal *Portal) handleMatrixMessage(sender *User, evt *event.Event) {
 	}
 
 	var sendReq discordgo.MessageSend
+	nativeSticker := ""
+	if evt.Type == event.EventSticker && !isWebhookSend {
+		nativeSticker = portal.expressionStickerID(content.URL)
+	}
 
 	var description string
 	if evt.Type == event.EventSticker {
 		content.MsgType = event.MsgImage
-		if mimeData := mimetype.Lookup(content.Info.MimeType); mimeData != nil {
-			description = content.Body
-			content.Body = "sticker" + mimeData.Extension()
+		if content.Info != nil {
+			if mimeData := mimetype.Lookup(content.Info.MimeType); mimeData != nil {
+				description = content.Body
+				content.Body = "sticker" + mimeData.Extension()
+			}
 		}
 	}
 
@@ -1764,6 +1780,11 @@ func (portal *Portal) handleMatrixMessage(sender *User, evt *event.Event) {
 			sendReq.Content = fmt.Sprintf("_%s_", sendReq.Content)
 		}
 	case event.MsgAudio, event.MsgFile, event.MsgImage, event.MsgVideo:
+		if nativeSticker != "" {
+			stickerIDs := []string{nativeSticker}
+			sendReq.StickerIDs = &stickerIDs
+			break
+		}
 		data, err := downloadMatrixAttachment(portal.MainIntent(), content)
 		if err != nil {
 			go portal.sendMessageMetrics(evt, err, "Error downloading media in")

@@ -34,6 +34,28 @@ Set the option to `false` to restore Discord deletion redactions. Matrix-origin
 deletions retain their existing behavior. Attachments actually removed during a
 Discord message edit are still redacted.
 
+### Server emoji and sticker packs
+
+The bridge publishes each server's custom emoji and stickers into its bridged
+channel rooms as `im.ponies.room_emotes` packs. Clients supporting these packs,
+including FluffyChat, can display them in their emoji and sticker pickers. Packs
+refresh when the bridge receives server or expression updates. To populate or
+refresh existing rooms manually, run `!discord sync-emotes` in a bridged server
+channel (use your configured command prefix if different).
+
+From Matrix, send `:name:` for an unambiguous server emoji or `:name~id:` to select
+an exact emoji. Picker images also map back to Discord's static or animated emoji
+markup by their Matrix media URI. Unknown or ambiguous shortcodes remain text;
+HTML code blocks and URLs retain their contents.
+
+Picking a mapped server sticker sends its native Discord sticker ID when using a
+logged-in account or bot. Webhook relay and unmapped stickers use the existing
+image upload path. Mappings apply to the current room's Discord server; Discord
+still enforces availability and account permissions. Pack media is unencrypted,
+including in encrypted rooms, so clients can use it in their pickers. Failed
+asset downloads or conversions are logged; other assets still publish. GIF
+sticker conversion requires FFmpeg, and Lottie uses the configured converter.
+
 ### Animated stickers
 
 GIF stickers download from Discord's media host and convert to looping animated

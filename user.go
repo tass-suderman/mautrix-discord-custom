@@ -704,6 +704,16 @@ func (user *User) eventHandler(rawEvt any) {
 		user.guildDeleteHandler(evt)
 	case *discordgo.GuildUpdate:
 		user.guildUpdateHandler(evt)
+	case *discordgo.GuildEmojisUpdate:
+		if evt.Emojis == nil {
+			evt.Emojis = []*discordgo.Emoji{}
+		}
+		user.syncGuildExpressions(&discordgo.Guild{ID: evt.GuildID, Emojis: evt.Emojis})
+	case *discordgo.GuildStickersUpdate:
+		if evt.Stickers == nil {
+			evt.Stickers = []*discordgo.Sticker{}
+		}
+		user.syncGuildExpressions(&discordgo.Guild{ID: evt.GuildID, Stickers: evt.Stickers})
 	case *discordgo.GuildRoleCreate:
 		user.discordRoleToDB(evt.GuildID, evt.Role, nil, nil)
 	case *discordgo.GuildRoleUpdate:
@@ -1095,6 +1105,7 @@ func (user *User) handleGuild(meta *discordgo.Guild, timestamp time.Time, isInSp
 		user.handleGuildRoles(meta.ID, meta.Roles)
 	}
 	user.addGuildToSpace(guild, isInSpace, timestamp)
+	user.syncGuildExpressions(meta)
 }
 
 func (user *User) connectedHandler(_ *discordgo.Connect) {

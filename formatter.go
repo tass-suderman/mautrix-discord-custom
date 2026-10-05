@@ -213,6 +213,9 @@ var matrixHTMLParser = &format.HTMLParser{
 			// If we're in a code block, don't escape markdown
 			return s
 		}
+		if portal, ok := ctx.ReturnData[formatterContextPortalKey].(*Portal); ok {
+			return portal.expressionText(s)
+		}
 		return escapeDiscordMarkdown(s)
 	},
 	SpoilerConverter: func(text, reason string, ctx format.Context) string {
@@ -253,8 +256,8 @@ func (portal *Portal) parseMatrixHTML(content *event.MessageEventContent, allowe
 		if content.Mentions != nil {
 			ctx.ReturnData[formatterContextInputAllowedMentionsKey] = content.Mentions.UserIDs
 		}
-		return variationselector.FullyQualify(matrixHTMLParser.Parse(content.FormattedBody, ctx)), allowedMentions
+		return variationselector.FullyQualify(matrixHTMLParser.Parse(portal.expressionHTML(content.FormattedBody), ctx)), allowedMentions
 	} else {
-		return variationselector.FullyQualify(escapeDiscordMarkdown(content.Body)), allowedMentions
+		return variationselector.FullyQualify(portal.expressionText(content.Body)), allowedMentions
 	}
 }
