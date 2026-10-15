@@ -688,6 +688,12 @@ func (user *User) eventHandler(rawEvt any) {
 		for _, member := range evt.Members {
 			user.updateGuildMemberProfile(evt.GuildID, member)
 		}
+	case *discordgo.GuildMemberAdd:
+		user.updateGuildMemberProfile(evt.GuildID, evt.Member)
+	case *discordgo.GuildMemberRemove:
+		if guild := user.bridge.GetGuildByID(evt.GuildID, false); guild != nil {
+			guild.removeRoleMember(evt.User.ID)
+		}
 	case *discordgo.GuildMemberUpdate:
 		user.updateGuildMemberProfile(evt.GuildID, evt.Member)
 	case *discordgo.Resumed:
@@ -716,10 +722,13 @@ func (user *User) eventHandler(rawEvt any) {
 		user.syncGuildExpressions(&discordgo.Guild{ID: evt.GuildID, Stickers: evt.Stickers})
 	case *discordgo.GuildRoleCreate:
 		user.discordRoleToDB(evt.GuildID, evt.Role, nil, nil)
+		user.refreshTrackedRoles(evt.GuildID)
 	case *discordgo.GuildRoleUpdate:
 		user.discordRoleToDB(evt.GuildID, evt.Role, nil, nil)
+		user.refreshTrackedRoles(evt.GuildID)
 	case *discordgo.GuildRoleDelete:
 		user.bridge.DB.Role.DeleteByID(evt.GuildID, evt.RoleID)
+		user.refreshTrackedRoles(evt.GuildID)
 	case *discordgo.ChannelCreate:
 		user.channelCreateHandler(evt)
 	case *discordgo.ChannelDelete:
@@ -766,6 +775,9 @@ func (user *User) eventHandler(rawEvt any) {
 func (user *User) updateGuildMemberProfile(guildID string, member *discordgo.Member) {
 	if member == nil || member.User == nil {
 		return
+	}
+	if guild := user.bridge.GetGuildByID(guildID, false); guild != nil {
+		guild.updateRoleMember(member)
 	}
 	puppet := user.bridge.GetPuppetByID(member.User.ID)
 	puppet.UpdateInfo(user, member.User, nil)
@@ -1106,6 +1118,7 @@ func (user *User) handleGuild(meta *discordgo.Guild, timestamp time.Time, isInSp
 	}
 	user.addGuildToSpace(guild, isInSpace, timestamp)
 	user.syncGuildExpressions(meta)
+	guild.startRoleLoop(user)
 }
 
 func (user *User) connectedHandler(_ *discordgo.Connect) {

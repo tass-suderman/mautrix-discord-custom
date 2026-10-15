@@ -104,7 +104,7 @@ func (r *Role) Delete(txn dbutil.Execable) {
 	if txn == nil {
 		txn = r.db
 	}
-	_, err := txn.Exec(roleDelete, r.GuildID, r.Icon)
+	_, err := txn.Exec(roleDelete, r.GuildID, r.ID)
 	if err != nil {
 		r.log.Warnfln("Failed to delete %s/%s: %v", r.GuildID, r.ID, err)
 		panic(err)

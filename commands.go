@@ -550,16 +550,17 @@ var cmdGuilds = &commands.FullHandler{
 	Help: commands.HelpMeta{
 		Section:     HelpSectionPortalManagement,
 		Description: "Guild bridging management",
-		Args:        "<status/bridge/unbridge/bridging-mode> [_guild ID_] [...]",
+		Args:        "<status/bridge/unbridge/bridging-mode/roles> [_guild ID_] [...]",
 	},
 	RequiresLogin: true,
 }
 
-const smallGuildsHelp = "**Usage**: `$cmdprefix guilds <help/status/bridge/unbridge> [guild ID] [...]`"
+const smallGuildsHelp = "**Usage**: `$cmdprefix guilds <help/status/bridge/unbridge/roles> [guild ID] [...]`"
 
 const fullGuildsHelp = smallGuildsHelp + `
 
 * **help** - View this help message.
+* **roles <_guild ID_> <start/stop>** - Track highest colored roles for all guild members.
 * **status** - View the list of guilds and their bridging status.
 * **bridge <_guild ID_> [--entire]** - Enable bridging for a guild. The --entire flag auto-creates portals for all channels.
 * **bridging-mode <_guild ID_> <_mode_>** - Set the mode for bridging messages and new channels in a guild.
@@ -579,6 +580,8 @@ func fnGuilds(ce *WrappedCommandEvent) {
 		fnBridgeGuild(ce)
 	case "unbridge", "delete":
 		fnUnbridgeGuild(ce)
+	case "roles":
+		fnGuildRoles(ce)
 	case "bridging-mode", "mode":
 		fnGuildBridgingMode(ce)
 	case "help":

@@ -40,6 +40,11 @@ type Guild struct {
 	bridge *DiscordBridge
 	log    log.Logger
 
+	roleLock       sync.Mutex
+	roleRunning    bool
+	roleWake       chan struct{}
+	roleMembers    map[string]*discordgo.Member
+	roleSent       map[string]guildRoleContent
 	roomCreateLock sync.Mutex
 }
 
