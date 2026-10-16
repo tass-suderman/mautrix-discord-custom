@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -12,6 +13,11 @@ import (
 
 var guildRoleEvent = event.Type{Type: "fi.mau.discord.member_role", Class: event.StateEventType}
 var guildRoleTrackingEvent = event.Type{Type: "fi.mau.discord.role_tracking", Class: event.StateEventType}
+
+// Matrix reserves state keys starting with @ for events sent by that user.
+func guildRoleStateKey(mxid id.UserID) string {
+	return "user:" + mxid.String()
+}
 
 type guildRoleContent struct {
 	RoleID string `json:"role_id,omitempty"`
@@ -55,7 +61,7 @@ func (guild *Guild) publishRoleLocked(member *discordgo.Member) {
 		return
 	}
 	mxid := guild.bridge.GetPuppetByID(member.User.ID).MXID
-	if _, err := guild.bridge.Bot.SendStateEvent(guild.MXID, guildRoleEvent, mxid.String(), content); err != nil {
+	if _, err := guild.bridge.Bot.SendStateEvent(guild.MXID, guildRoleEvent, guildRoleStateKey(mxid), content); err != nil {
 		guild.log.Warnln("Failed to publish guild role:", err)
 	} else {
 		guild.roleSent[member.User.ID] = content
@@ -86,7 +92,7 @@ func (guild *Guild) removeRoleMember(userID string) {
 		return
 	}
 	mxid := guild.bridge.GetPuppetByID(userID).MXID
-	if _, err := guild.bridge.Bot.SendStateEvent(guild.MXID, guildRoleEvent, mxid.String(), guildRoleContent{}); err != nil {
+	if _, err := guild.bridge.Bot.SendStateEvent(guild.MXID, guildRoleEvent, guildRoleStateKey(mxid), guildRoleContent{}); err != nil {
 		guild.log.Warnln("Failed to clear guild role:", err)
 	}
 	delete(guild.roleMembers, userID)
@@ -234,7 +240,11 @@ func (guild *Guild) syncRoles(user *User) error {
 	}
 	guild.roleLock.Lock()
 	var removed []string
-	for mxid := range state[guildRoleEvent] {
+	for stateKey := range state[guildRoleEvent] {
+		mxid, prefixed := strings.CutPrefix(stateKey, "user:")
+		if !prefixed {
+			continue
+		}
 		if userID, ok := guild.bridge.ParsePuppetMXID(id.UserID(mxid)); ok && !seen[userID] {
 			removed = append(removed, userID)
 		}

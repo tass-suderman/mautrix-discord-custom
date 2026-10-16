@@ -2,6 +2,8 @@ package main
 
 import (
 	"github.com/bwmarrin/discordgo"
+	"maunium.net/go/mautrix/id"
+	"strings"
 	"testing"
 )
 
@@ -64,4 +66,19 @@ func TestRoleMemberChunks(t *testing.T) {
 		t.Fatalf("got %d members", len(request.members))
 	}
 	request.add(chunk) // Must not close the completion channel twice.
+}
+
+func TestGuildRoleStateKeyAvoidsReservedUserNamespace(t *testing.T) {
+	mxid := id.UserID("@discord_716794514647547974:matrix.sadbean.red")
+	key := guildRoleStateKey(mxid)
+	if strings.HasPrefix(key, "@") {
+		t.Fatal("Matrix rejects another user's @ state key even when sent by the room creator")
+	}
+	if key != "user:"+mxid.String() {
+		t.Fatalf("unexpected consumer state key: %q", key)
+	}
+	decoded, ok := strings.CutPrefix(key, "user:")
+	if !ok || id.UserID(decoded) != mxid {
+		t.Fatal("consumer cannot recover ghost ID")
+	}
 }
