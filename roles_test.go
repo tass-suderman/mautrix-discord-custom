@@ -1,10 +1,11 @@
 package main
 
 import (
-	"github.com/bwmarrin/discordgo"
-	"maunium.net/go/mautrix/id"
 	"strings"
 	"testing"
+
+	"github.com/bwmarrin/discordgo"
+	"maunium.net/go/mautrix/id"
 )
 
 func TestHighestColoredRole(t *testing.T) {
