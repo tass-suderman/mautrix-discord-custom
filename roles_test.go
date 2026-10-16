@@ -34,3 +34,34 @@ func TestHighestColoredRole(t *testing.T) {
 		t.Fatalf("colorless roles must clear metadata: %+v", got)
 	}
 }
+
+func TestRoleMemberChunks(t *testing.T) {
+	request := &roleMemberRequest{nonce: "roles", members: make(map[string]*discordgo.Member), chunks: make(map[int]bool), done: make(chan struct{})}
+	request.add(&discordgo.GuildMembersChunk{Nonce: "unrelated", ChunkCount: 1})
+	request.add(&discordgo.GuildMembersChunk{Nonce: "roles", ChunkIndex: 2, ChunkCount: 2})
+	if len(request.chunks) != 0 {
+		t.Fatal("accepted unrelated or invalid chunk")
+	}
+	chunk := &discordgo.GuildMembersChunk{Nonce: "roles", ChunkIndex: 1, ChunkCount: 2, Members: []*discordgo.Member{nil, {User: &discordgo.User{ID: "123"}}}}
+	request.add(chunk)
+	request.add(chunk)
+	select {
+	case <-request.done:
+		t.Fatal("duplicate chunk completed request early")
+	default:
+	}
+	request.add(&discordgo.GuildMembersChunk{Nonce: "roles", ChunkIndex: 0, ChunkCount: 3})
+	if request.complete {
+		t.Fatal("inconsistent chunk count completed request")
+	}
+	request.add(&discordgo.GuildMembersChunk{Nonce: "roles", ChunkIndex: 0, ChunkCount: 2})
+	select {
+	case <-request.done:
+	default:
+		t.Fatal("out-of-order chunks failed to complete")
+	}
+	if len(request.members) != 1 {
+		t.Fatalf("got %d members", len(request.members))
+	}
+	request.add(chunk) // Must not close the completion channel twice.
+}

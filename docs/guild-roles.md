@@ -7,7 +7,7 @@ Run these commands in the Matrix bridge bot management room (using your configur
 !discord guilds roles <guild ID> stop
 ```
 
-Bridge the guild first with `guilds bridge <guild ID>`. The caller must be logged in and belong to the guild. The setting is persisted per guild. It covers every member, including members without a portal or Matrix membership. Initial and hourly reconciliation use Discord's paginated guild members API; the Discord account must have access to list all members (bot accounts need the privileged Guild Members intent). Failures are logged and retried hourly. Discord member and role events also update metadata immediately. Restart/reconnect resumes synchronization.
+Bridge the guild first with `guilds bridge <guild ID>`. The caller must be logged in and belong to the guild. The setting is persisted per guild. It covers every member, including members without a portal or Matrix membership. Initial and hourly reconciliation use gateway member requests for user accounts, with roles from gateway guild state. Bot accounts use the paginated guild members API and need the privileged Guild Members intent. Discord must allow the account to enumerate all members; gateway responses must complete within 60 seconds. Incomplete responses retain existing metadata and never trigger stale-member cleanup. Failures are logged and retried hourly. Discord member and role events also update metadata immediately. Restart/reconnect resumes synchronization.
 
 Matrix has no standard membership property for Discord role names/colors. This bridge reuses its existing Discord role database and publishes custom Matrix state in the **guild space**, not the user's global profile. No Matrix permissions are derived from Discord roles.
 

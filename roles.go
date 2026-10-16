@@ -108,14 +108,91 @@ func (user *User) refreshTrackedRoles(guildID string) {
 	}
 }
 
+type roleMemberRequest struct {
+	nonce    string
+	members  map[string]*discordgo.Member
+	chunks   map[int]bool
+	count    int
+	done     chan struct{}
+	complete bool
+}
+
+func (request *roleMemberRequest) add(chunk *discordgo.GuildMembersChunk) {
+	if request.complete || chunk.Nonce != request.nonce || chunk.ChunkCount <= 0 || chunk.ChunkIndex < 0 || chunk.ChunkIndex >= chunk.ChunkCount {
+		return
+	}
+	if request.count != 0 && request.count != chunk.ChunkCount {
+		return
+	}
+	request.count = chunk.ChunkCount
+	request.chunks[chunk.ChunkIndex] = true
+	for _, member := range chunk.Members {
+		if member != nil && member.User != nil {
+			request.members[member.User.ID] = member
+		}
+	}
+	if len(request.chunks) == request.count {
+		request.complete = true
+		close(request.done)
+	}
+}
+
+func (guild *Guild) receiveRoleChunk(chunk *discordgo.GuildMembersChunk) {
+	guild.roleLock.Lock()
+	defer guild.roleLock.Unlock()
+	if guild.roleRequest != nil {
+		guild.roleRequest.add(chunk)
+	}
+}
+
+func (guild *Guild) gatewayRoleMembers(session *discordgo.Session) ([]*discordgo.Member, error) {
+	request := &roleMemberRequest{nonce: generateNonce(), members: make(map[string]*discordgo.Member), chunks: make(map[int]bool), done: make(chan struct{})}
+	guild.roleLock.Lock()
+	guild.roleRequest = request
+	guild.roleLock.Unlock()
+	defer func() { guild.roleLock.Lock(); guild.roleRequest = nil; guild.roleLock.Unlock() }()
+	if err := session.RequestGuildMembers(guild.ID, "", 0, request.nonce, false); err != nil {
+		return nil, fmt.Errorf("request guild members via gateway: %w", err)
+	}
+	timer := time.NewTimer(60 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-request.done:
+		guild.roleLock.Lock()
+		defer guild.roleLock.Unlock()
+		members := make([]*discordgo.Member, 0, len(request.members))
+		for _, member := range request.members {
+			members = append(members, member)
+		}
+		return members, nil
+	case <-timer.C:
+		return nil, fmt.Errorf("gateway member request timed out; Discord may not allow this account to enumerate all guild members (existing role metadata retained)")
+	}
+}
+
 func (guild *Guild) syncRoles(user *User) error {
 	session := user.Session
 	if session == nil {
 		return fmt.Errorf("Discord is disconnected")
 	}
-	roles, err := session.GuildRoles(guild.ID)
-	if err != nil {
-		return err
+	var roles []*discordgo.Role
+	var err error
+	if session.IsUser {
+		meta, stateErr := session.State.Guild(guild.ID)
+		if stateErr != nil {
+			return fmt.Errorf("get gateway guild roles: %w", stateErr)
+		}
+		session.State.RLock()
+		roles = append(roles, meta.Roles...)
+		session.State.RUnlock()
+		if len(roles) == 0 {
+			return fmt.Errorf("guild roles have not arrived from Discord yet")
+		}
+	} else {
+		roles, err = session.GuildRoles(guild.ID)
+		if err != nil {
+			return fmt.Errorf("fetch guild roles: %w", err)
+		}
 	}
 	user.handleGuildRoles(guild.ID, roles)
 	state, err := guild.bridge.Bot.State(guild.MXID)
@@ -124,10 +201,20 @@ func (guild *Guild) syncRoles(user *User) error {
 	}
 	seen := make(map[string]bool)
 	after := ""
-	for {
-		members, err := session.GuildMembers(guild.ID, after, 1000)
+	var gatewayMembers []*discordgo.Member
+	if session.IsUser {
+		gatewayMembers, err = guild.gatewayRoleMembers(session)
 		if err != nil {
 			return err
+		}
+	}
+	for {
+		members := gatewayMembers
+		if !session.IsUser {
+			members, err = session.GuildMembers(guild.ID, after, 1000)
+			if err != nil {
+				return fmt.Errorf("list guild members: %w", err)
+			}
 		}
 		for _, member := range members {
 			if member.User == nil {
@@ -136,7 +223,7 @@ func (guild *Guild) syncRoles(user *User) error {
 			seen[member.User.ID] = true
 			guild.updateRoleMember(member)
 		}
-		if len(members) < 1000 {
+		if session.IsUser || len(members) < 1000 {
 			break
 		}
 		next := members[len(members)-1].User.ID

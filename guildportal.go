@@ -43,6 +43,7 @@ type Guild struct {
 	roleLock       sync.Mutex
 	roleRunning    bool
 	roleWake       chan struct{}
+	roleRequest    *roleMemberRequest
 	roleMembers    map[string]*discordgo.Member
 	roleSent       map[string]guildRoleContent
 	roomCreateLock sync.Mutex

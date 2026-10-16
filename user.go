@@ -684,6 +684,9 @@ func (user *User) eventHandler(rawEvt any) {
 	case *discordgo.PresencesReplace:
 		user.presencesHandler(*evt)
 	case *discordgo.GuildMembersChunk:
+		if guild := user.bridge.GetGuildByID(evt.GuildID, false); guild != nil {
+			guild.receiveRoleChunk(evt)
+		}
 		user.presencesHandler(evt.Presences)
 		for _, member := range evt.Members {
 			user.updateGuildMemberProfile(evt.GuildID, member)
