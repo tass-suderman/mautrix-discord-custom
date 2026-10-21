@@ -1578,6 +1578,31 @@ func (portal *Portal) getRelayUserMeta(sender *User) (name, avatarURL string) {
 	return
 }
 
+const replyPingKey = "fi.mau.discord.reply_ping"
+
+func configureReplyMentions(req *discordgo.MessageSend, content *event.MessageEventContent, raw map[string]any, replyToUser id.UserID, webhook bool) {
+	ping := true
+	if content.Mentions != nil {
+		ping = len(content.Mentions.UserIDs) != 0 && (replyToUser == "" || slices.Contains(content.Mentions.UserIDs, replyToUser))
+	}
+	explicitPing, explicit := raw[replyPingKey].(bool)
+	if explicit {
+		ping = explicitPing
+	}
+	if webhook {
+		// Webhook replies are embeds and cannot ping a reply author.
+		return
+	}
+	// Preserve normal mention parsing for user accounts and personal bots.
+	req.AllowedMentions = nil
+	if req.Reference != nil && (!ping || explicit) {
+		req.AllowedMentions = &discordgo.MessageAllowedMentions{
+			Parse:       []discordgo.AllowedMentionType{discordgo.AllowedMentionTypeUsers, discordgo.AllowedMentionTypeRoles, discordgo.AllowedMentionTypeEveryone},
+			RepliedUser: ping,
+		}
+	}
+}
+
 const replyEmbedMaxLines = 1
 const replyEmbedMaxChars = 72
 
@@ -1841,23 +1866,8 @@ func (portal *Portal) handleMatrixMessage(sender *User, evt *event.Event) {
 		go portal.sendMessageMetrics(evt, fmt.Errorf("%w %q", errUnknownMsgType, content.MsgType), "Ignoring")
 		return
 	}
-	silentReply := content.Mentions != nil && replyToMXID != "" &&
-		(len(content.Mentions.UserIDs) == 0 || (replyToUser != "" && !slices.Contains(content.Mentions.UserIDs, replyToUser)))
-	if silentReply && sendReq.AllowedMentions != nil {
-		sendReq.AllowedMentions.RepliedUser = false
-	}
-	if !isWebhookSend {
-		// AllowedMentions must not be set for real users, and it's also not that useful for personal bots.
-		// It's only important for relaying, where the webhook may have higher permissions than the user on Matrix.
-		if silentReply {
-			sendReq.AllowedMentions = &discordgo.MessageAllowedMentions{
-				Parse:       []discordgo.AllowedMentionType{discordgo.AllowedMentionTypeUsers, discordgo.AllowedMentionTypeRoles, discordgo.AllowedMentionTypeEveryone},
-				RepliedUser: false,
-			}
-		} else {
-			sendReq.AllowedMentions = nil
-		}
-	} else if strings.Contains(sendReq.Content, "@everyone") || strings.Contains(sendReq.Content, "@here") {
+	configureReplyMentions(&sendReq, content, evt.Content.Raw, replyToUser, isWebhookSend)
+	if isWebhookSend && (strings.Contains(sendReq.Content, "@everyone") || strings.Contains(sendReq.Content, "@here")) {
 		powerLevels, err := portal.MainIntent().PowerLevels(portal.MXID)
 		if err != nil {
 			portal.log.Warn().Err(err).
