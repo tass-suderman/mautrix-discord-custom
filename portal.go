@@ -822,7 +822,7 @@ func (portal *Portal) sendThreadCreationNotice(ctx context.Context, thread *Thre
 func removedDiscordParts(msg *discordgo.Message, existing []*database.Message) map[string]*database.Message {
 	attachmentMap := map[string]*database.Message{}
 	for _, existingPart := range existing {
-		if existingPart.AttachmentID != "" {
+		if existingPart.AttachmentID != "" && existingPart.AttachmentID != discordGalleryPartID {
 			attachmentMap[existingPart.AttachmentID] = existingPart
 		}
 	}
@@ -899,9 +899,20 @@ func (portal *Portal) handleDiscordMessageUpdate(user *User, msg *discordgo.Mess
 		if msg.StickerItems != nil {
 			creationMessage.StickerItems = msg.StickerItems
 		}
+		if msg.Content != "" || (msg.EditedTimestamp != nil &&
+			(creationMessage.EditedTimestamp == nil || msg.EditedTimestamp.After(*creationMessage.EditedTimestamp))) {
+			creationMessage.Content = msg.Content
+			creationMessage.EditedTimestamp = msg.EditedTimestamp
+		}
 		// TODO are there other fields that need copying?
 		msg = creationMessage
 	} else {
+		// Caption-only updates can omit attachments even when the author is set.
+		if msg.Attachments == nil {
+			if previous, ok := portal.recentMessages.Get(msg.ID); ok {
+				msg.Attachments = previous.Attachments
+			}
+		}
 		portal.recentMessages.Replace(msg.ID, msg)
 	}
 	if msg.Author.ID == portal.RelayWebhookID {
@@ -929,17 +940,57 @@ func (portal *Portal) handleDiscordMessageUpdate(user *User, msg *discordgo.Mess
 		deletedAttachment.Delete()
 	}
 
+	editTarget := existing[0]
+	for _, part := range existing {
+		if part.AttachmentID == discordGalleryPartID {
+			editTarget = part
+			break
+		}
+	}
 	var converted *ConvertedMessage
 	// Slightly hacky special case: messages with gif links will get an embed with the gif.
 	// The link isn't rendered on Discord, so just edit the link message into a gif message on Matrix too.
-	if isPlainGifMessage(msg) {
+	if editTarget.AttachmentID == discordGalleryPartID {
+		var parts []*ConvertedMessage
+		if text := portal.convertDiscordTextMessage(ctx, intent, msg); text != nil {
+			parts = append(parts, text)
+		}
+		for _, att := range msg.Attachments {
+			parts = append(parts, portal.convertDiscordAttachment(ctx, intent, msg.ID, att))
+		}
+		parts = groupDiscordAttachments(parts, true)
+		// Do not replace a gallery with incomplete media after a download failure.
+		if len(parts) != 1 {
+			log.Warn().Msg("Skipping gallery edit because an attachment failed to convert")
+			return
+		}
+		converted = parts[0]
+	} else if isPlainGifMessage(msg) {
 		converted = portal.convertDiscordVideoEmbed(ctx, intent, msg.Embeds[0])
 	} else {
 		converted = portal.convertDiscordTextMessage(ctx, intent, msg)
 	}
+	// Captioned images must stay media events when their caption is edited or removed.
+	if editTarget.AttachmentID != "" {
+		for _, att := range msg.Attachments {
+			if att.ID == editTarget.AttachmentID && strings.HasPrefix(att.ContentType, "image/") {
+				image := portal.convertDiscordAttachment(ctx, intent, msg.ID, att)
+				if image.Content.MsgType != event.MsgImage {
+					log.Warn().Msg("Skipping caption edit because the image failed to convert")
+					return
+				}
+				if converted != nil && converted.Content.MsgType == event.MsgText {
+					converted = attachDiscordCaption([]*ConvertedMessage{converted, image})[0]
+				} else if converted == nil {
+					converted = image
+				}
+				break
+			}
+		}
+	}
 	if converted == nil {
 		log.Debug().
-			Bool("has_message_on_matrix", existing[0].AttachmentID == "").
+			Bool("has_message_on_matrix", editTarget.AttachmentID == "").
 			Bool("has_text_on_discord", len(msg.Content) > 0).
 			Msg("Dropping non-text edit")
 		return
@@ -947,7 +998,7 @@ func (portal *Portal) handleDiscordMessageUpdate(user *User, msg *discordgo.Mess
 	puppet.addWebhookMeta(converted, msg)
 	puppet.addMemberMeta(converted, msg)
 	converted.Content.Mentions = portal.convertDiscordMentions(msg, false)
-	converted.Content.SetEdit(existing[0].MXID)
+	converted.Content.SetEdit(editTarget.MXID)
 	// Never actually mention new users of edits, only include mentions inside m.new_content
 	converted.Content.Mentions = &event.Mentions{}
 	if converted.Extra != nil {
@@ -970,7 +1021,7 @@ func (portal *Portal) handleDiscordMessageUpdate(user *User, msg *discordgo.Mess
 	portal.sendDeliveryReceipt(resp.EventID)
 
 	if msg.EditedTimestamp != nil {
-		existing[0].UpdateEditTimestamp(*msg.EditedTimestamp)
+		editTarget.UpdateEditTimestamp(*msg.EditedTimestamp)
 	}
 	log.Debug().
 		Str("event_id", resp.EventID.String()).
@@ -1079,17 +1130,25 @@ func (portal *Portal) handleDeletedParts(intent *appservice.IntentAPI, msgID str
 	return
 }
 
-// Spoiler metadata is stored in raw content, outside MessageEventContent. Keep it
-// on both the replacement and its fallback so deletion edits cannot reveal media.
+// Gallery items and spoiler metadata live outside MessageEventContent. Keep
+// them on both the replacement and fallback when marking a message deleted.
 func spoilerEditExtra(original map[string]any) map[string]any {
-	if original[mediaSpoilerKey] != true {
+	newContent := map[string]any{}
+	if items, ok := original["itemtypes"]; ok {
+		newContent["itemtypes"] = items
+	}
+	if original[mediaSpoilerKey] == true {
+		newContent[mediaSpoilerKey] = true
+		if reason, ok := original[mediaSpoilerKey+".reason"].(string); ok {
+			newContent[mediaSpoilerKey+".reason"] = reason
+		}
+	}
+	if len(newContent) == 0 {
 		return nil
 	}
-	newContent := map[string]any{mediaSpoilerKey: true}
-	extra := map[string]any{mediaSpoilerKey: true, "m.new_content": newContent}
-	if reason, ok := original[mediaSpoilerKey+".reason"].(string); ok {
-		newContent[mediaSpoilerKey+".reason"] = reason
-		extra[mediaSpoilerKey+".reason"] = reason
+	extra := map[string]any{"m.new_content": newContent}
+	for key, value := range newContent {
+		extra[key] = value
 	}
 	return extra
 }
@@ -1804,63 +1863,84 @@ func (portal *Portal) handleMatrixMessage(sender *User, evt *event.Event) {
 		if content.MsgType == event.MsgEmote {
 			sendReq.Content = fmt.Sprintf("_%s_", sendReq.Content)
 		}
-	case event.MsgAudio, event.MsgFile, event.MsgImage, event.MsgVideo:
+	case event.MsgAudio, event.MsgFile, event.MsgImage, event.MsgVideo, matrixGalleryMsgType:
 		if nativeSticker != "" {
 			stickerIDs := []string{nativeSticker}
 			sendReq.StickerIDs = &stickerIDs
 			break
 		}
-		data, err := downloadMatrixAttachment(portal.MainIntent(), content)
-		if err != nil {
-			go portal.sendMessageMetrics(evt, err, "Error downloading media in")
-			return
+		items := []matrixGalleryItem{{MessageEventContent: *content}}
+		if content.MsgType == matrixGalleryMsgType {
+			var err error
+			items, err = parseMatrixGallery(evt.Content.Raw)
+			if err != nil {
+				go portal.sendMessageMetrics(evt, err, "Invalid gallery in")
+				return
+			}
 		}
-		filename := content.Body
-		if content.FileName != "" && content.FileName != content.Body {
-			filename = content.FileName
+		if content.MsgType == matrixGalleryMsgType || (content.FileName != "" && content.FileName != content.Body) {
 			sendReq.Content, sendReq.AllowedMentions = portal.parseMatrixHTML(content, parseAllowedLinkPreviews(evt.Content.Raw))
 		}
-
-		if evt.Content.Raw[mediaSpoilerKey] == true {
-			filename = "SPOILER_" + filename
-		}
-
-		if portal.bridge.Config.Bridge.UseDiscordCDNUpload && !isWebhookSend && sess.IsUser {
-			att := &discordgo.MessageAttachment{
-				ID:                  "0",
-				Filename:            filename,
-				Description:         description,
-				OriginalContentType: content.Info.MimeType,
-			}
-			sendReq.Attachments = []*discordgo.MessageAttachment{att}
-			isClip := false
-			prep, err := sender.Session.ChannelAttachmentCreate(channelID, &discordgo.ReqPrepareAttachments{
-				Files: []*discordgo.FilePrepare{{
-					Size: len(data),
-					Name: att.Filename,
-					ID:   sender.NextDiscordUploadID(),
-
-					IsClip:              &isClip,
-					OriginalContentType: att.OriginalContentType,
-				}},
-			}, portal.RefererOpt(threadID))
+		for i, item := range items {
+			media := &item.MessageEventContent
+			data, err := downloadMatrixAttachment(portal.MainIntent(), media)
 			if err != nil {
-				go portal.sendMessageMetrics(evt, err, "Error preparing to reupload media in")
+				go portal.sendMessageMetrics(evt, err, "Error downloading media in")
 				return
 			}
-			prepared := prep.Attachments[0]
-			att.UploadedFilename = prepared.UploadFilename
-			err = uploadDiscordAttachment(sender.Session.Client, prepared.UploadURL, data)
-			if err != nil {
-				go portal.sendMessageMetrics(evt, err, "Error reuploading media in")
-				return
+			filename := media.Body
+			if media.FileName != "" {
+				filename = media.FileName
 			}
-		} else {
-			sendReq.Files = []*discordgo.File{{
-				Name:        filename,
-				ContentType: content.Info.MimeType,
-				Reader:      bytes.NewReader(data),
-			}}
+			if item.Spoiler || evt.Content.Raw[mediaSpoilerKey] == true {
+				filename = "SPOILER_" + filename
+			}
+			mimeType := ""
+			if media.Info != nil {
+				mimeType = media.Info.MimeType
+			}
+
+			if portal.bridge.Config.Bridge.UseDiscordCDNUpload && !isWebhookSend && sess.IsUser {
+				att := &discordgo.MessageAttachment{
+					ID:                  strconv.Itoa(i),
+					Filename:            filename,
+					Description:         description,
+					OriginalContentType: mimeType,
+				}
+				sendReq.Attachments = append(sendReq.Attachments, att)
+				isClip := false
+				prep, err := sender.Session.ChannelAttachmentCreate(channelID, &discordgo.ReqPrepareAttachments{
+					Files: []*discordgo.FilePrepare{{
+						Size: len(data),
+						Name: att.Filename,
+						ID:   sender.NextDiscordUploadID(),
+
+						IsClip:              &isClip,
+						OriginalContentType: att.OriginalContentType,
+					}},
+				}, portal.RefererOpt(threadID))
+				if err != nil {
+					go portal.sendMessageMetrics(evt, err, "Error preparing to reupload media in")
+					return
+				}
+				if len(prep.Attachments) != 1 {
+					go portal.sendMessageMetrics(evt, fmt.Errorf("Discord returned no prepared attachment"), "Error uploading media in")
+					return
+				}
+				prepared := prep.Attachments[0]
+				att.UploadedFilename = prepared.UploadFilename
+				err = uploadDiscordAttachment(sender.Session.Client, prepared.UploadURL, data)
+				if err != nil {
+					go portal.sendMessageMetrics(evt, err, "Error reuploading media in")
+					return
+				}
+			} else {
+				sendReq.Files = append(sendReq.Files, &discordgo.File{
+					Name:        filename,
+					ContentType: mimeType,
+					Reader:      bytes.NewReader(data),
+				})
+			}
 		}
 	default:
 		go portal.sendMessageMetrics(evt, fmt.Errorf("%w %q", errUnknownMsgType, content.MsgType), "Ignoring")
@@ -1900,7 +1980,9 @@ func (portal *Portal) handleMatrixMessage(sender *User, evt *event.Event) {
 		dbMsg := portal.bridge.DB.Message.New()
 		dbMsg.Channel = portal.Key
 		dbMsg.DiscordID = msg.ID
-		if len(msg.Attachments) > 0 {
+		if content.MsgType == matrixGalleryMsgType {
+			dbMsg.AttachmentID = discordGalleryPartID
+		} else if len(msg.Attachments) > 0 {
 			dbMsg.AttachmentID = msg.Attachments[0].ID
 		}
 		dbMsg.MXID = evt.ID

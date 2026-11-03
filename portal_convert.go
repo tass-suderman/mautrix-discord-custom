@@ -373,6 +373,27 @@ func (portal *Portal) convertDiscordVideoEmbed(ctx context.Context, intent *apps
 	}
 }
 
+// Keep the message caption on the first image using Matrix's media caption fields.
+func attachDiscordCaption(parts []*ConvertedMessage) []*ConvertedMessage {
+	if len(parts) < 2 || parts[0].Content.MsgType != event.MsgText || parts[1].Content.MsgType != event.MsgImage {
+		return parts
+	}
+	text, image := parts[0].Content, parts[1].Content
+	if image.FileName == "" {
+		image.FileName = image.Body
+	}
+	image.Body = text.Body
+	image.Format = text.Format
+	image.FormattedBody = text.FormattedBody
+	if parts[1].Extra == nil {
+		parts[1].Extra = make(map[string]any)
+	}
+	for key, value := range parts[0].Extra {
+		parts[1].Extra[key] = value
+	}
+	return parts[1:]
+}
+
 func (portal *Portal) convertDiscordMessage(ctx context.Context, puppet *Puppet, intent *appservice.IntentAPI, msg *discordgo.Message) []*ConvertedMessage {
 	// REST history responses may omit guild_id even when member data is present.
 	if msg.GuildID == "" && portal.GuildID != "" {
@@ -400,6 +421,7 @@ func (portal *Portal) convertDiscordMessage(ctx context.Context, puppet *Puppet,
 			parts = append(parts, part)
 		}
 	}
+	parts = groupDiscordAttachments(parts, false)
 	for _, sticker := range msg.StickerItems {
 		if _, handled := handledIDs[sticker.ID]; handled {
 			continue

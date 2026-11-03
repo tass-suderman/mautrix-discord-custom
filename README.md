@@ -85,6 +85,21 @@ WebP media is not incorrectly classified as removed. Partial updates distinguish
 omitted collections from explicitly empty collections for embeds, attachments,
 components, and stickers.
 
+### Grouped attachments and captions
+
+Discord messages with multiple attachments bridge to a single `m.room.message`
+using `msgtype: "dm.filament.gallery"` and an `itemtypes` array, matching
+matricechat's pinned Matrix SDK. The message text stays on the gallery as its
+caption. Single images use the normal `m.image` caption fields (`body`,
+`formatted_body`, and `filename`). Live messages and backfill use the same format.
+
+Client galleries send as one Discord message with the caption and all files,
+including encrypted media and per-image spoilers. Galleries exceeding Discord's
+ten-attachment limit are rejected without splitting or dropping images. A Matrix
+client needs gallery support to display grouped attachments. Gallery caption
+edits and attachment removals preserve the original Matrix event; preserved
+message-deletion edits keep the gallery's media too.
+
 ### Media spoilers
 
 Discord attachments with the `IS_SPOILER` flag (`flags & 8 != 0`) or a legacy
