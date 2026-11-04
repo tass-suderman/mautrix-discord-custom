@@ -63,7 +63,7 @@ var removeFeaturesExceptLinks = []any{
 }
 var removeFeaturesAndLinks = append(removeFeaturesExceptLinks, parser.NewLinkParser())
 var fixIndentedParagraphs = goldmark.WithParserOptions(parser.WithBlockParsers(util.Prioritized(defaultIndentableParagraphParser, 500)))
-var discordExtensions = goldmark.WithExtensions(extension.Strikethrough, mdext.SimpleSpoiler, mdext.DiscordUnderline, ExtDiscordEveryone, ExtDiscordTag)
+var discordExtensions = goldmark.WithExtensions(extension.Strikethrough, discordSpoilerExtension{}, mdext.DiscordUnderline, ExtDiscordEveryone, ExtDiscordTag)
 
 var discordRenderer = goldmark.New(
 	goldmark.WithParser(mdext.ParserWithoutFeatures(removeFeaturesAndLinks...)),
